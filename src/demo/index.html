@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="description" content="A local playground for LevelMate audio leveling." />
+    <title>LevelMate Playground</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <main>
+      <header>
+        <p class="eyebrow">LOCAL AUDIO PLAYGROUND</p>
+        <h1>LevelMate</h1>
+        <p class="intro">
+          Test smoother listening levels with a file that stays entirely in your browser.
+        </p>
+      </header>
+
+      <section class="panel" aria-labelledby="media-heading">
+        <h2 id="media-heading">Choose media</h2>
+        <label class="file-picker">
+          <span>Local audio or video file</span>
+          <input id="media-file" type="file" accept="audio/*,video/*" />
+        </label>
+        <div id="media-container" class="media-container">
+          <p class="empty-state">Select a file to begin. Nothing is uploaded or saved.</p>
+        </div>
+      </section>
+
+      <section class="panel controls" aria-labelledby="controls-heading">
+        <h2 id="controls-heading">Leveling controls</h2>
+        <div class="control-row">
+          <label for="preset">Preset</label>
+          <select id="preset">
+            <option value="off">Off</option>
+            <option value="light">Light</option>
+            <option value="normal" selected>Normal</option>
+            <option value="night">Night</option>
+          </select>
+        </div>
+        <label class="toggle-row">
+          <input id="bypass" type="checkbox" disabled />
+          <span>Bypass processing for comparison</span>
+        </label>
+        <button id="leveling-toggle" type="button" disabled>Enable leveling</button>
+        <p id="status" class="status" role="status">Choose a local file to start.</p>
+      </section>
+
+      <section class="panel" aria-labelledby="metrics-heading">
+        <h2 id="metrics-heading">Live metrics</h2>
+        <dl class="metrics">
+          <div><dt>RMS loudness</dt><dd id="metric-rms">—</dd></div>
+          <div><dt>Applied gain</dt><dd id="metric-gain">0.0 dB</dd></div>
+          <div><dt>Preset</dt><dd id="metric-preset">Normal</dd></div>
+          <div><dt>Processing</dt><dd id="metric-active">Inactive</dd></div>
+        </dl>
+      </section>
+    </main>
+    <script type="module" src="./main.ts"></script>
+  </body>
+</html>

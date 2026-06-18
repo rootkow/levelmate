@@ -1,0 +1,25 @@
+:root {
+  color-scheme: dark;
+  font-family: Inter, ui-sans-serif, system-ui, sans-serif;
+  background: #0d121a;
+  color: #eef3fa;
+}
+
+* { box-sizing: border-box; }
+body { width: 330px; margin: 0; }
+main { padding: 1rem; }
+header { display: flex; align-items: center; justify-content: space-between; gap: 1rem; }
+h1 { margin: 0; font-size: 1.25rem; }
+
+.badge { padding: 0.25rem 0.5rem; border-radius: 999px; background: #263142; color: #b6c0ce; font-size: 0.72rem; font-weight: 700; }
+.badge.active { background: #173e31; color: #83e3bd; }
+.warning { padding: 0.75rem; border: 1px solid #5b4a24; border-radius: 7px; background: #221d13; color: #dac58c; font-size: 0.8rem; line-height: 1.45; }
+label { display: block; margin: 1rem 0 0.35rem; color: #aeb9c8; font-size: 0.82rem; }
+select, button { width: 100%; border: 1px solid #334158; border-radius: 7px; background: #182232; color: inherit; padding: 0.6rem; font: inherit; }
+button { border-color: #6488ee; background: #426bdd; cursor: pointer; font-weight: 700; }
+button:disabled { cursor: not-allowed; opacity: 0.45; }
+.actions { display: grid; grid-template-columns: 2fr 1fr; gap: 0.5rem; margin-top: 0.8rem; }
+button.secondary { border-color: #334158; background: #182232; }
+.status { min-height: 3em; margin: 0.85rem 0 0; color: #b6c0ce; font-size: 0.82rem; line-height: 1.45; }
+button.link-button { padding: 0; border: 0; background: transparent; color: #91adff; font-size: 0.78rem; text-align: left; }
+.privacy { margin: 1rem 0 0; padding-top: 0.8rem; border-top: 1px solid #273246; color: #778497; font-size: 0.72rem; }

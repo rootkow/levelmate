@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>LevelMate</title>
+    <link rel="stylesheet" href="./popup.css" />
+  </head>
+  <body>
+    <main>
+      <header>
+        <h1>LevelMate</h1>
+        <span id="state-badge" class="badge">Inactive</span>
+      </header>
+
+      <p class="warning">
+        Processing is experimental. Protected or cross-origin media may become silent and require a page reload.
+      </p>
+
+      <label for="preset">Leveling preset</label>
+      <select id="preset">
+        <option value="light">Light</option>
+        <option value="normal" selected>Normal</option>
+        <option value="night">Night</option>
+      </select>
+
+      <div class="actions">
+        <button id="enable" type="button">Enable on this page</button>
+        <button id="disable" class="secondary" type="button" disabled>Disable</button>
+      </div>
+
+      <p id="status" class="status" role="status">Checking this page…</p>
+      <button id="reload" class="link-button" type="button">Reload page to restore playback</button>
+
+      <p class="privacy">Audio stays on your device. LevelMate does not record or upload it.</p>
+    </main>
+    <script type="module" src="./popup.ts"></script>
+  </body>
+</html>
