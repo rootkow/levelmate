@@ -53,6 +53,19 @@ The executable is created at:
 build\Release\levelmate-wasapi-probe.exe
 ```
 
+## Tests
+
+Build and run the native unit tests with CTest:
+
+```powershell
+cmake --build build --config Release --target levelmate-tests
+ctest --test-dir build -C Release --output-on-failure
+```
+
+The tests cover CLI parsing, silence gating, gain limits, peak limiting, PCM
+sample conversion, clipping, and the audio ring buffer. They do not require an
+active audio device or target application.
+
 ## Choose a target process
 
 LevelMate accepts the root PID of the application to normalize. It includes

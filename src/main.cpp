@@ -504,6 +504,22 @@ double from_dbfs(double dbfs) {
     return std::pow(10.0, dbfs / 20.0);
 }
 
+double calculate_smoothed_gain(double peakDb, double& smoothDb, double elapsedMs) {
+    if (!std::isfinite(peakDb) || peakDb < kSilenceGateDbfs) {
+        return 1.0;
+    }
+
+    const double timeConstant = peakDb > smoothDb ? kAttackMs : kReleaseMs;
+    const double alpha = 1.0 - std::exp(-elapsedMs / timeConstant);
+    smoothDb += alpha * (peakDb - smoothDb);
+    return std::clamp(from_dbfs(kTargetDbfs) / from_dbfs(smoothDb),
+                      from_dbfs(kMinGainDb), from_dbfs(kMaxGainDb));
+}
+
+double apply_peak_limiter(double gain, double peak) {
+    return peak > 0.0 ? std::min(gain, from_dbfs(kTargetDbfs) / peak) : gain;
+}
+
 std::string dbfs_color(double dbfs) {
     if (dbfs < -40) return "\033[90m";
     if (dbfs < -20) return "\033[92m";
@@ -796,9 +812,6 @@ void run_rerender(const Options& options, std::vector<SessionInfo>& sessions,
                  "and processed audio is being rendered to the default output.\n"
               << "Press Ctrl+C to stop.\n" << std::flush;
 
-    const double targetLinear = from_dbfs(kTargetDbfs);
-    const double maxGainLinear = from_dbfs(kMaxGainDb);
-    const double minGainLinear = from_dbfs(kMinGainDb);
     double smoothDb = kSilenceGateDbfs;
     double currentGainDb = 0.0;
     CaptureStats accumulatedStats{};
@@ -846,14 +859,10 @@ void run_rerender(const Options& options, std::vector<SessionInfo>& sessions,
                     if (std::isfinite(peakDb) && peakDb >= kSilenceGateDbfs) {
                         const double packetMs = static_cast<double>(frames) * 1000.0 /
                                                 format.nSamplesPerSec;
-                        const double timeConstant = peakDb > smoothDb ? kAttackMs : kReleaseMs;
-                        const double alpha = 1.0 - std::exp(-packetMs / timeConstant);
-                        smoothDb += alpha * (peakDb - smoothDb);
-                        gain = std::clamp(targetLinear / from_dbfs(smoothDb),
-                                          minGainLinear, maxGainLinear);
+                        gain = calculate_smoothed_gain(peakDb, smoothDb, packetMs);
                         // The smoother controls perceived loudness; this packet ceiling
                         // catches spikes immediately and prevents digital clipping.
-                        gain = std::min(gain, targetLinear / stats.peak);
+                        gain = apply_peak_limiter(gain, stats.peak);
                         currentGainDb = to_dbfs(gain);
                     } else {
                         currentGainDb = 0.0;
@@ -993,13 +1002,6 @@ void run_probe(const Options& options) {
     AudioClientStopGuard captureStopGuard(*captureClient.Get());
 
     double smoothDb = -60.0;
-    double targetLinear = from_dbfs(kTargetDbfs);
-    double attackAlpha = 1.0 - std::exp(static_cast<double>(kReportInterval.count()) * -0.001 /
-                                        (kAttackMs * 0.001));
-    double releaseAlpha = 1.0 - std::exp(static_cast<double>(kReportInterval.count()) * -0.001 /
-                                         (kReleaseMs * 0.001));
-    double maxGainLinear = from_dbfs(kMaxGainDb);
-    double minGainLinear = from_dbfs(kMinGainDb);
     double currentGainDb = 0.0;
 
     std::cout << "Target: " << static_cast<int>(kTargetDbfs) << " dBFS"
@@ -1067,14 +1069,9 @@ void run_probe(const Options& options) {
         if (afterAction >= nextAction) {
             if (accumulatedStats.frames > 0) {
                 const double peakDb = to_dbfs(accumulatedStats.peak);
-                double desiredGainLin = 1.0;
+                const double desiredGainLin = calculate_smoothed_gain(
+                    peakDb, smoothDb, static_cast<double>(kReportInterval.count()));
                 if (std::isfinite(peakDb) && peakDb >= kSilenceGateDbfs) {
-                    const double alpha = (peakDb > smoothDb) ? attackAlpha : releaseAlpha;
-                    smoothDb += alpha * (peakDb - smoothDb);
-
-                    const double smoothLinear = from_dbfs(smoothDb);
-                    desiredGainLin = std::clamp(
-                        targetLinear / smoothLinear, minGainLinear, maxGainLinear);
                     currentGainDb = to_dbfs(desiredGainLin);
                 } else {
                     // Never turn digital silence or sub-gate noise into maximum gain.
@@ -1106,6 +1103,7 @@ void run_probe(const Options& options) {
 
 }  // namespace
 
+#ifndef LEVELMATE_TESTING
 int wmain(int argc, wchar_t* argv[]) {
     const auto options = parse_options(argc, argv);
     if (!options) {
@@ -1152,3 +1150,4 @@ int wmain(int argc, wchar_t* argv[]) {
     CoUninitialize();
     return exitCode;
 }
+#endif

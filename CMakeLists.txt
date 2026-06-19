@@ -10,15 +10,27 @@ if(NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
 endif()
 
 add_executable(levelmate-wasapi-probe src/main.cpp)
-target_compile_features(levelmate-wasapi-probe PRIVATE cxx_std_20)
-target_compile_definitions(levelmate-wasapi-probe PRIVATE
-    UNICODE
-    _UNICODE
-    WIN32_LEAN_AND_MEAN
-    NOMINMAX
-    _WIN32_WINNT=0x0A00
-)
-target_compile_options(levelmate-wasapi-probe PRIVATE
-    $<$<CXX_COMPILER_ID:MSVC>:/W4 /permissive- /EHsc>
-)
-target_link_libraries(levelmate-wasapi-probe PRIVATE mmdevapi ole32)
+
+function(configure_levelmate_target target)
+    target_compile_features(${target} PRIVATE cxx_std_20)
+    target_compile_definitions(${target} PRIVATE
+        UNICODE
+        _UNICODE
+        WIN32_LEAN_AND_MEAN
+        NOMINMAX
+        _WIN32_WINNT=0x0A00
+    )
+    target_compile_options(${target} PRIVATE
+        $<$<CXX_COMPILER_ID:MSVC>:/W4 /permissive- /EHsc>
+    )
+    target_link_libraries(${target} PRIVATE mmdevapi ole32)
+endfunction()
+
+configure_levelmate_target(levelmate-wasapi-probe)
+
+include(CTest)
+if(BUILD_TESTING)
+    add_executable(levelmate-tests tests/main_tests.cpp)
+    configure_levelmate_target(levelmate-tests)
+    add_test(NAME levelmate-unit-tests COMMAND levelmate-tests)
+endif()
