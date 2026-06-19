@@ -201,7 +201,7 @@ std::optional<Integer> parse_integer(std::wstring_view value) {
 
 void print_usage() {
     std::wcout
-        << L"Usage: levelmate-wasapi-probe.exe <firefox-root-pid> "
+        << L"Usage: levelmate-wasapi-probe.exe <root-pid> "
            L"[--duration <seconds>] [--rerender]\n"
         << L"AGC via session volume control. Target: "
         << static_cast<int>(kTargetDbfs) << L" dBFS, "
@@ -255,18 +255,6 @@ void validate_process(DWORD processId) {
         throw std::runtime_error("The target process is not running");
     }
 
-    std::vector<wchar_t> imagePath(32768);
-    DWORD imagePathLength = static_cast<DWORD>(imagePath.size());
-    if (!QueryFullProcessImageNameW(process.get(), 0, imagePath.data(), &imagePathLength)) {
-        check_hresult(HRESULT_FROM_WIN32(GetLastError()), "QueryFullProcessImageName");
-    }
-    const std::wstring_view path(imagePath.data(), imagePathLength);
-    const size_t separator = path.find_last_of(L"\\/");
-    const std::wstring_view executable = path.substr(
-        separator == std::wstring_view::npos ? 0 : separator + 1);
-    if (_wcsicmp(std::wstring(executable).c_str(), L"firefox.exe") != 0) {
-        throw std::runtime_error("The target PID is not a Firefox process");
-    }
 }
 
 ComPtr<IAudioClient> activate_process_loopback(DWORD processId) {
@@ -804,7 +792,7 @@ void run_rerender(const Options& options, std::vector<SessionInfo>& sessions,
     check_hresult(captureClient.Start(), "IAudioClient::Start(capture)");
     AudioClientStopGuard captureStopGuard(captureClient);
 
-    std::cout << "Digital rerender enabled: Firefox's direct session is attenuated "
+    std::cout << "Digital rerender enabled: the target's direct session is attenuated "
                  "and processed audio is being rendered to the default output.\n"
               << "Press Ctrl+C to stop.\n" << std::flush;
 
@@ -942,14 +930,14 @@ void run_probe(const Options& options) {
     if (sessions.empty()) {
         std::cout << "No active audio sessions found for the process tree (PID "
                   << options.processId << ").\n"
-                  << "Open a tab that plays audio (YouTube, Crunchyroll, etc.) and re-run.\n"
+                  << "Start audio in the target application and re-run.\n"
                   << std::flush;
         return;
     }
     SessionRestoreGuard sessionRestoreGuard(sessions);
 
     std::cout << "Found " << sessions.size() << " audio session(s) for "
-              << treePids.size() << " Firefox processes.\n";
+              << treePids.size() << " target processes.\n";
 
     ComPtr<IAudioClient> captureClient = activate_process_loopback(options.processId);
 
@@ -978,7 +966,7 @@ void run_probe(const Options& options) {
         run_rerender(options, sessions, *captureClient.Get(), *captureFormat.get(), encoding);
         std::cout << "\n\nRestoring original volumes...\n" << std::flush;
         if (!restore_sessions(sessions)) {
-            throw std::runtime_error("One or more Firefox session volumes could not be restored");
+            throw std::runtime_error("One or more target session volumes could not be restored");
         }
         std::cout << "Done.\n" << std::flush;
         return;
@@ -1111,7 +1099,7 @@ void run_probe(const Options& options) {
 
     std::cout << "\n\nRestoring original volumes...\n" << std::flush;
     if (!restore_sessions(sessions)) {
-        throw std::runtime_error("One or more Firefox session volumes could not be restored");
+        throw std::runtime_error("One or more target session volumes could not be restored");
     }
     std::cout << "Done.\n" << std::flush;
 }

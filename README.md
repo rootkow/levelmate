@@ -1,34 +1,32 @@
 # LevelMate
 
-LevelMate is a lightweight Windows utility that keeps Firefox audio at a more
-consistent listening level. It captures audio from a Firefox process tree with
-WASAPI, measures the signal in real time, and automatically reduces loud spikes
-or boosts quiet content.
+LevelMate is a lightweight Windows utility that keeps application audio at a
+more consistent listening level. It captures audio from a selected process tree
+with WASAPI, measures the signal in real time, and automatically reduces loud
+spikes or boosts quiet content.
 
-It is useful for streaming services, videos, and other browser audio with large
-volume differences between scenes or episodes.
+It works with browsers, media players, games, and other desktop applications
+that expose a Windows audio session.
 
 ## Features
 
 - Real-time automatic gain control (AGC)
 - Fast attenuation of loud peaks
-- Optional digital boost for content that is quiet at 100% Firefox volume
+- Optional digital boost for content that remains quiet at 100% app volume
 - Live terminal meters for raw level, smoothed level, target, and gain
-- Firefox-only process targeting; other applications remain unchanged
-- Automatic restoration of original Firefox session volumes on clean exit
+- Process-tree targeting that leaves unrelated applications unchanged
+- Automatic restoration of original session volumes on clean exit
 - No recording, saved audio, network communication, or telemetry
 
 ## Operating modes
 
-LevelMate has two modes:
-
 | Mode | Behavior | Best for |
 | --- | --- | --- |
-| Standard | Adjusts the Windows volume of the selected Firefox sessions. It can reduce loud audio but cannot exceed the 100% session-volume limit. | Controlling spikes with minimal processing |
-| Digital boost (`--rerender`) | Attenuates the direct Firefox feed, applies gain to the captured samples, and renders the processed audio to the default output. | Boosting genuinely quiet content as well as controlling spikes |
+| Standard | Adjusts the Windows volume of the selected application's sessions. It can reduce loud audio but cannot exceed the 100% session-volume limit. | Controlling spikes with minimal processing |
+| Digital boost (`--rerender`) | Attenuates the app's direct feed, applies gain to captured samples, and renders the processed audio to the default output. | Boosting genuinely quiet content as well as controlling spikes |
 
-Both modes target -16 dBFS, use a 50 ms attack and 3000 ms release, ignore
-signals below -60 dBFS, and limit automatic gain to +20 dB.
+Both modes target -16 dBFS, use a 50 ms attack and 3000 ms release, avoid
+boosting signals below -60 dBFS, and limit automatic gain to +20 dB.
 
 ## Requirements
 
@@ -55,89 +53,100 @@ The executable is created at:
 build\Release\levelmate-wasapi-probe.exe
 ```
 
-## Find the Firefox root PID
+## Choose a target process
 
-Start Firefox and begin playing audio. Then list its processes:
+LevelMate accepts the root PID of the application to normalize. It includes
+audio from that process and its descendants.
+
+List candidate processes in PowerShell:
 
 ```powershell
-Get-CimInstance Win32_Process -Filter "Name = 'firefox.exe'" |
+Get-CimInstance Win32_Process |
   Sort-Object CreationDate |
-  Format-Table ProcessId, ParentProcessId, CreationDate -AutoSize
+  Format-Table Name, ProcessId, ParentProcessId, CreationDate -AutoSize
 ```
 
-Use the oldest Firefox process whose parent is not another Firefox process.
-LevelMate validates that the supplied PID belongs to `firefox.exe` before making
-any volume changes.
+For a multi-process application such as Firefox or Chrome, choose the oldest
+long-lived application process whose parent is not another process from the
+same application. For a game or media player, the main executable is usually
+the correct target. Start audio before launching LevelMate so its audio session
+can be discovered.
 
 ## Usage
 
 ### Standard mode
 
 ```powershell
-.\build\Release\levelmate-wasapi-probe.exe <firefox-root-pid>
+.\build\Release\levelmate-wasapi-probe.exe <root-pid>
 ```
 
-This mode is the safest starting point. It controls loud content through the
-Firefox session volume but cannot amplify audio beyond that session's 100%
-ceiling.
+This is the safest starting point. It controls loud content through application
+session volume but cannot amplify beyond the session's 100% ceiling.
 
 ### Digital boost mode
 
 ```powershell
-.\build\Release\levelmate-wasapi-probe.exe <firefox-root-pid> --rerender
+.\build\Release\levelmate-wasapi-probe.exe <root-pid> --rerender
 ```
 
-Digital boost mode keeps a -40 dB Firefox monitor feed available for capture,
+Digital boost mode keeps a -40 dB monitor feed available for capture,
 compensates for that attenuation, applies AGC directly to the samples, and
 renders the result to the current default output device. An instantaneous
 limiter prevents processed packet peaks from exceeding the -16 dBFS target.
 
-### Run for a fixed duration
+### Fixed duration
 
 Add `--duration` in either mode:
 
 ```powershell
-.\build\Release\levelmate-wasapi-probe.exe <firefox-root-pid> --duration 60
-.\build\Release\levelmate-wasapi-probe.exe <firefox-root-pid> --rerender --duration 60
+.\build\Release\levelmate-wasapi-probe.exe <root-pid> --duration 60
+.\build\Release\levelmate-wasapi-probe.exe <root-pid> --rerender --duration 60
 ```
 
 Without `--duration`, LevelMate runs until you press Ctrl+C.
 
 ## Multiple audio sources
 
-LevelMate only processes the selected Firefox process tree. Audio from games,
-music players, voice chat, and other applications continues through its normal
-Windows audio session.
+LevelMate processes only the selected application tree. Audio from games,
+browsers, music players, voice chat, and other unrelated applications continues
+through its normal Windows audio session.
 
-For example, when World of Warcraft and Crunchyroll are playing together:
+For example, if LevelMate targets a browser while a game is running:
 
-- Crunchyroll and other Firefox audio are normalized together.
-- World of Warcraft is not modified.
-- Windows mixes the processed Firefox stream with the game audio at the output.
+- Audio from the targeted browser tree is normalized together.
+- The game's audio is not modified.
+- Windows mixes the processed browser stream with the game at the output.
 
-The limiter protects Firefox audio, not the final mix of every application.
-Multiple Firefox tabs playing simultaneously are treated as one combined
-Firefox stream.
+The limiter protects the targeted application's audio, not the final mix of
+every application. Multiple audio sources inside one target process tree are
+treated as one combined stream.
+
+Run only one LevelMate instance against a given target process. Multiple
+instances targeting the same app would compete over session volume and cleanup.
 
 ## Safety and cleanup
 
 - Begin at a comfortable speaker or headphone volume. Digital boost mode can
   add up to 20 dB to quiet material.
 - Stop LevelMate with Ctrl+C or let `--duration` expire. Both paths restore the
-  original Firefox session volumes.
+  original target session volumes.
 - If the process is forcibly terminated or the computer loses power, cleanup
-  cannot run. Restore Firefox manually through Windows Volume mixer if needed.
+  cannot run. Restore the app manually through Windows Volume mixer if needed.
 - If the default output device changes while digital boost mode is running,
   restart LevelMate so it can initialize against the new device.
+- Some protected, elevated, sandboxed, or exclusive-mode applications may not
+  expose audio that process loopback can capture.
 
 ## How it works
 
-1. LevelMate discovers the selected Firefox process and its descendants.
-2. WASAPI process loopback captures their audio without writing it to disk.
-3. The AGC measures peaks and smooths changes toward the -16 dBFS target.
-4. Standard mode adjusts Firefox session volume; digital boost mode processes
-   and rerenders the PCM samples.
-5. On clean exit, LevelMate stops its audio clients and restores the original
+1. LevelMate validates that the target PID is active and discovers its child
+   processes.
+2. It finds matching sessions on the default Windows render endpoint.
+3. WASAPI process loopback captures their audio without writing it to disk.
+4. The AGC measures peaks and smooths changes toward the -16 dBFS target.
+5. Standard mode adjusts session volume; digital boost mode processes and
+   rerenders PCM samples.
+6. On clean exit, LevelMate stops its audio clients and restores the original
    session volumes.
 
 ## Privacy
