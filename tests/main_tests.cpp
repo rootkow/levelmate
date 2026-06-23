@@ -178,6 +178,13 @@ void test_recovery_serialization() {
     invalidMagic[0] ^= 0xFF;
     expect(!deserialize_recovery_entries(invalidMagic),
            "recovery journal rejects an invalid header");
+
+    expect(is_missing_recovery_file_error(ERROR_FILE_NOT_FOUND),
+           "recovery read treats a missing file as empty");
+    expect(is_missing_recovery_file_error(ERROR_PATH_NOT_FOUND),
+           "recovery read treats a missing directory as empty");
+    expect(!is_missing_recovery_file_error(ERROR_ACCESS_DENIED),
+           "recovery read still reports non-missing errors");
 }
 
 }  // namespace

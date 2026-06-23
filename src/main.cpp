@@ -520,6 +520,10 @@ std::filesystem::path recovery_file_path() {
     return std::filesystem::path(localAppData) / L"LevelMate" / L"volume-recovery.bin";
 }
 
+bool is_missing_recovery_file_error(DWORD error) noexcept {
+    return error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND;
+}
+
 void write_recovery_file(const std::filesystem::path& path,
                          const std::vector<RecoveryEntry>& entries) {
     std::filesystem::create_directories(path.parent_path());
@@ -546,7 +550,9 @@ std::optional<std::vector<RecoveryEntry>> read_recovery_file(
     UniqueHandle file(CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
                                   OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr));
     if (!file) {
-        if (GetLastError() == ERROR_FILE_NOT_FOUND) return std::vector<RecoveryEntry>{};
+        if (is_missing_recovery_file_error(GetLastError())) {
+            return std::vector<RecoveryEntry>{};
+        }
         check_hresult(HRESULT_FROM_WIN32(GetLastError()), "CreateFile(recovery read)");
     }
     LARGE_INTEGER size{};
