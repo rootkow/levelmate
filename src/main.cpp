@@ -13,6 +13,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <filesystem>
 #include <iomanip>
 #include <iostream>
 #include <limits>
@@ -338,6 +339,8 @@ struct SessionInfo {
     DWORD processId;
     float originalVolume;
     std::wstring displayName;
+    std::wstring sessionIdentifier;
+    std::wstring instanceIdentifier;
 };
 
 std::vector<SessionInfo> enumerate_sessions(const std::vector<DWORD>& pids) {
@@ -374,7 +377,8 @@ std::vector<SessionInfo> enumerate_sessions(const std::vector<DWORD>& pids) {
         DWORD sessionPid = 0;
         if (FAILED(ctrl2->GetProcessId(&sessionPid))) continue;
 
-        if (std::find(pids.begin(), pids.end(), sessionPid) == pids.end()) continue;
+        if (!pids.empty() &&
+            std::find(pids.begin(), pids.end(), sessionPid) == pids.end()) continue;
 
         ComPtr<ISimpleAudioVolume> sv;
         if (FAILED(ctrl->QueryInterface(IID_PPV_ARGS(&sv)))) continue;
@@ -390,10 +394,255 @@ std::vector<SessionInfo> enumerate_sessions(const std::vector<DWORD>& pids) {
             CoTaskMemFree(dnPtr);
         }
 
-        sessions.push_back({sv, sessionPid, originalVol, dn});
+        std::wstring sessionIdentifier;
+        wchar_t* sessionIdentifierPtr = nullptr;
+        if (SUCCEEDED(ctrl2->GetSessionIdentifier(&sessionIdentifierPtr)) &&
+            sessionIdentifierPtr != nullptr) {
+            sessionIdentifier = sessionIdentifierPtr;
+            CoTaskMemFree(sessionIdentifierPtr);
+        }
+
+        std::wstring instanceIdentifier;
+        wchar_t* instanceIdentifierPtr = nullptr;
+        if (SUCCEEDED(ctrl2->GetSessionInstanceIdentifier(&instanceIdentifierPtr)) &&
+            instanceIdentifierPtr != nullptr) {
+            instanceIdentifier = instanceIdentifierPtr;
+            CoTaskMemFree(instanceIdentifierPtr);
+        }
+
+        // Never modify a session that cannot be identified after a restart.
+        if (sessionIdentifier.empty() && instanceIdentifier.empty()) continue;
+
+        sessions.push_back({sv, sessionPid, originalVol, dn,
+                            sessionIdentifier, instanceIdentifier});
     }
 
     return sessions;
+}
+
+struct RecoveryEntry {
+    float originalVolume = 0.0F;
+    float appliedVolume = 0.0F;
+    std::wstring sessionIdentifier;
+    std::wstring instanceIdentifier;
+};
+
+constexpr std::uint32_t kRecoveryMagic = 0x4C4D5243;  // LMRC
+constexpr std::uint32_t kRecoveryVersion = 1;
+constexpr size_t kMaxRecoveryFileSize = 1024 * 1024;
+
+template <typename Value>
+void append_recovery_value(std::vector<BYTE>& bytes, const Value& value) {
+    const auto* first = reinterpret_cast<const BYTE*>(&value);
+    bytes.insert(bytes.end(), first, first + sizeof(value));
+}
+
+void append_recovery_string(std::vector<BYTE>& bytes, const std::wstring& value) {
+    const auto size = static_cast<std::uint32_t>(value.size());
+    append_recovery_value(bytes, size);
+    const auto* first = reinterpret_cast<const BYTE*>(value.data());
+    bytes.insert(bytes.end(), first, first + value.size() * sizeof(wchar_t));
+}
+
+std::vector<BYTE> serialize_recovery_entries(const std::vector<RecoveryEntry>& entries) {
+    std::vector<BYTE> bytes;
+    append_recovery_value(bytes, kRecoveryMagic);
+    append_recovery_value(bytes, kRecoveryVersion);
+    append_recovery_value(bytes, static_cast<std::uint32_t>(entries.size()));
+    for (const auto& entry : entries) {
+        append_recovery_value(bytes, entry.originalVolume);
+        append_recovery_value(bytes, entry.appliedVolume);
+        append_recovery_string(bytes, entry.sessionIdentifier);
+        append_recovery_string(bytes, entry.instanceIdentifier);
+    }
+    return bytes;
+}
+
+template <typename Value>
+bool read_recovery_value(const std::vector<BYTE>& bytes, size_t& offset, Value& value) {
+    if (offset > bytes.size() || bytes.size() - offset < sizeof(value)) return false;
+    std::memcpy(&value, bytes.data() + offset, sizeof(value));
+    offset += sizeof(value);
+    return true;
+}
+
+bool read_recovery_string(const std::vector<BYTE>& bytes, size_t& offset,
+                          std::wstring& value) {
+    std::uint32_t length = 0;
+    if (!read_recovery_value(bytes, offset, length)) return false;
+    const size_t byteLength = static_cast<size_t>(length) * sizeof(wchar_t);
+    if (offset > bytes.size() || byteLength > bytes.size() - offset) return false;
+    value.assign(reinterpret_cast<const wchar_t*>(bytes.data() + offset), length);
+    offset += byteLength;
+    return true;
+}
+
+std::optional<std::vector<RecoveryEntry>> deserialize_recovery_entries(
+    const std::vector<BYTE>& bytes) {
+    size_t offset = 0;
+    std::uint32_t magic = 0;
+    std::uint32_t version = 0;
+    std::uint32_t count = 0;
+    if (!read_recovery_value(bytes, offset, magic) ||
+        !read_recovery_value(bytes, offset, version) ||
+        !read_recovery_value(bytes, offset, count) ||
+        magic != kRecoveryMagic || version != kRecoveryVersion || count > 4096) {
+        return std::nullopt;
+    }
+
+    std::vector<RecoveryEntry> entries;
+    entries.reserve(count);
+    for (std::uint32_t index = 0; index < count; ++index) {
+        RecoveryEntry entry;
+        if (!read_recovery_value(bytes, offset, entry.originalVolume) ||
+            !read_recovery_value(bytes, offset, entry.appliedVolume) ||
+            !read_recovery_string(bytes, offset, entry.sessionIdentifier) ||
+            !read_recovery_string(bytes, offset, entry.instanceIdentifier) ||
+            !std::isfinite(entry.originalVolume) || !std::isfinite(entry.appliedVolume) ||
+            entry.originalVolume < 0.0F || entry.originalVolume > 1.0F ||
+            entry.appliedVolume < 0.0F || entry.appliedVolume > 1.0F) {
+            return std::nullopt;
+        }
+        entries.push_back(std::move(entry));
+    }
+    if (offset != bytes.size()) return std::nullopt;
+    return entries;
+}
+
+std::filesystem::path recovery_file_path() {
+    DWORD required = GetEnvironmentVariableW(L"LOCALAPPDATA", nullptr, 0);
+    if (required == 0) {
+        throw std::runtime_error("LOCALAPPDATA is unavailable");
+    }
+    std::wstring localAppData(required, L'\0');
+    GetEnvironmentVariableW(L"LOCALAPPDATA", localAppData.data(), required);
+    localAppData.resize(required - 1);
+    return std::filesystem::path(localAppData) / L"LevelMate" / L"volume-recovery.bin";
+}
+
+void write_recovery_file(const std::filesystem::path& path,
+                         const std::vector<RecoveryEntry>& entries) {
+    std::filesystem::create_directories(path.parent_path());
+    const auto temporaryPath = path.wstring() + L".tmp";
+    const auto bytes = serialize_recovery_entries(entries);
+    UniqueHandle file(CreateFileW(temporaryPath.c_str(), GENERIC_WRITE, 0, nullptr,
+                                  CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr));
+    if (!file) check_hresult(HRESULT_FROM_WIN32(GetLastError()), "CreateFile(recovery)");
+    DWORD written = 0;
+    if (!WriteFile(file.get(), bytes.data(), static_cast<DWORD>(bytes.size()),
+                   &written, nullptr) || written != bytes.size() ||
+        !FlushFileBuffers(file.get())) {
+        check_hresult(HRESULT_FROM_WIN32(GetLastError()), "WriteFile(recovery)");
+    }
+    file.reset();
+    if (!MoveFileExW(temporaryPath.c_str(), path.c_str(),
+                     MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+        check_hresult(HRESULT_FROM_WIN32(GetLastError()), "MoveFileEx(recovery)");
+    }
+}
+
+std::optional<std::vector<RecoveryEntry>> read_recovery_file(
+    const std::filesystem::path& path) {
+    UniqueHandle file(CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
+                                  OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr));
+    if (!file) {
+        if (GetLastError() == ERROR_FILE_NOT_FOUND) return std::vector<RecoveryEntry>{};
+        check_hresult(HRESULT_FROM_WIN32(GetLastError()), "CreateFile(recovery read)");
+    }
+    LARGE_INTEGER size{};
+    if (!GetFileSizeEx(file.get(), &size) || size.QuadPart < 0 ||
+        size.QuadPart > static_cast<LONGLONG>(kMaxRecoveryFileSize)) {
+        return std::nullopt;
+    }
+    std::vector<BYTE> bytes(static_cast<size_t>(size.QuadPart));
+    DWORD read = 0;
+    if (!bytes.empty() &&
+        (!ReadFile(file.get(), bytes.data(), static_cast<DWORD>(bytes.size()), &read, nullptr) ||
+         read != bytes.size())) {
+        return std::nullopt;
+    }
+    return deserialize_recovery_entries(bytes);
+}
+
+void clear_recovery_file(const std::filesystem::path& path) noexcept {
+    std::error_code ignored;
+    std::filesystem::remove(path, ignored);
+    std::filesystem::remove(path.wstring() + L".tmp", ignored);
+}
+
+class RecoveryJournal final {
+public:
+    explicit RecoveryJournal(const std::vector<SessionInfo>& sessions)
+        : path_(recovery_file_path()) {
+        entries_.reserve(sessions.size());
+        for (const auto& session : sessions) {
+            entries_.push_back({session.originalVolume, session.originalVolume,
+                                session.sessionIdentifier, session.instanceIdentifier});
+        }
+        write_recovery_file(path_, entries_);
+    }
+
+    void record_applied(const std::vector<float>& volumes) {
+        if (volumes.size() != entries_.size()) {
+            throw std::logic_error("Recovery journal volume count mismatch");
+        }
+        for (size_t index = 0; index < volumes.size(); ++index) {
+            entries_[index].appliedVolume = volumes[index];
+        }
+        write_recovery_file(path_, entries_);
+    }
+
+    void clear() noexcept { clear_recovery_file(path_); }
+
+private:
+    std::filesystem::path path_;
+    std::vector<RecoveryEntry> entries_;
+};
+
+void recover_interrupted_session_changes() {
+    const auto path = recovery_file_path();
+    const auto pending = read_recovery_file(path);
+    if (!pending) {
+        std::wcerr << L"Warning: discarded an invalid volume recovery file.\n";
+        clear_recovery_file(path);
+        return;
+    }
+    if (pending->empty()) return;
+
+    auto active = enumerate_sessions({});
+    size_t restored = 0;
+    std::vector<RecoveryEntry> unresolved;
+    for (const auto& entry : *pending) {
+        auto match = std::find_if(active.begin(), active.end(), [&](const SessionInfo& session) {
+            if (!entry.instanceIdentifier.empty() &&
+                session.instanceIdentifier == entry.instanceIdentifier) return true;
+            return !entry.sessionIdentifier.empty() &&
+                   session.sessionIdentifier == entry.sessionIdentifier;
+        });
+        if (match == active.end()) continue;
+
+        float current = 0.0F;
+        if (FAILED(match->volume->GetMasterVolume(&current))) {
+            unresolved.push_back(entry);
+            continue;
+        }
+        if (std::abs(current - entry.appliedVolume) > 0.0001F) {
+            continue;  // Preserve a volume change made after LevelMate stopped.
+        }
+        if (FAILED(match->volume->SetMasterVolume(entry.originalVolume, nullptr))) {
+            unresolved.push_back(entry);
+            continue;
+        }
+        ++restored;
+    }
+    if (!unresolved.empty()) {
+        write_recovery_file(path, unresolved);
+        throw std::runtime_error(
+            "A volume left by an interrupted run could not be restored");
+    }
+    clear_recovery_file(path);
+    std::cout << "Recovered " << restored
+              << " volume change(s) left by an interrupted LevelMate run.\n";
 }
 
 bool restore_sessions(std::vector<SessionInfo>& sessions) noexcept {
@@ -415,15 +664,21 @@ bool restore_sessions(std::vector<SessionInfo>& sessions) noexcept {
 
 class SessionRestoreGuard final {
 public:
-    explicit SessionRestoreGuard(std::vector<SessionInfo>& sessions) noexcept
-        : sessions_(sessions) {}
-    ~SessionRestoreGuard() { restore_sessions(sessions_); }
+    explicit SessionRestoreGuard(std::vector<SessionInfo>& sessions)
+        : sessions_(sessions), journal_(sessions) {}
+    ~SessionRestoreGuard() {
+        if (restore_sessions(sessions_)) journal_.clear();
+    }
+
+    RecoveryJournal& journal() noexcept { return journal_; }
+    void clear_journal() noexcept { journal_.clear(); }
 
     SessionRestoreGuard(const SessionRestoreGuard&) = delete;
     SessionRestoreGuard& operator=(const SessionRestoreGuard&) = delete;
 
 private:
     std::vector<SessionInfo>& sessions_;
+    RecoveryJournal journal_;
 };
 
 enum class SampleEncoding { Float32, Pcm8, Pcm16, Pcm24, Pcm32 };
@@ -742,6 +997,7 @@ private:
 };
 
 void run_rerender(const Options& options, std::vector<SessionInfo>& sessions,
+                  RecoveryJournal& recoveryJournal,
                   IAudioClient& captureClient, const WAVEFORMATEX& format,
                   SampleEncoding encoding) {
     ComPtr<IMMDeviceEnumerator> enumerator;
@@ -796,9 +1052,17 @@ void run_rerender(const Options& options, std::vector<SessionInfo>& sessions,
     check_hresult(wasapiRender->ReleaseBuffer(renderBufferFrames, AUDCLNT_BUFFERFLAGS_SILENT),
                   "IAudioRenderClient::ReleaseBuffer(initial)");
 
-    for (auto& session : sessions) {
+    std::vector<float> monitorVolumes;
+    monitorVolumes.reserve(sessions.size());
+    for (const auto& session : sessions) {
         const float monitorVolume = static_cast<float>(
             static_cast<double>(session.originalVolume) * kRerenderMonitorScale);
+        monitorVolumes.push_back(monitorVolume);
+    }
+    recoveryJournal.record_applied(monitorVolumes);
+    for (size_t index = 0; index < sessions.size(); ++index) {
+        auto& session = sessions[index];
+        const float monitorVolume = monitorVolumes[index];
         check_hresult(session.volume->SetMasterVolume(monitorVolume, nullptr),
                       "ISimpleAudioVolume::SetMasterVolume(rerender monitor)");
     }
@@ -972,11 +1236,13 @@ void run_probe(const Options& options) {
     const SampleEncoding encoding = sample_encoding(*captureFormat.get());
 
     if (options.rerender) {
-        run_rerender(options, sessions, *captureClient.Get(), *captureFormat.get(), encoding);
+        run_rerender(options, sessions, sessionRestoreGuard.journal(),
+                     *captureClient.Get(), *captureFormat.get(), encoding);
         std::cout << "\n\nRestoring original volumes...\n" << std::flush;
         if (!restore_sessions(sessions)) {
             throw std::runtime_error("One or more target session volumes could not be restored");
         }
+        sessionRestoreGuard.clear_journal();
         std::cout << "Done.\n" << std::flush;
         return;
     }
@@ -1079,9 +1345,17 @@ void run_probe(const Options& options) {
                     currentGainDb = 0.0;
                 }
 
-                for (auto& s : sessions) {
+                std::vector<float> appliedVolumes;
+                appliedVolumes.reserve(sessions.size());
+                for (const auto& s : sessions) {
                     const float newVol = static_cast<float>(
                         std::clamp(static_cast<double>(s.originalVolume) * desiredGainLin, 0.0, 1.0));
+                    appliedVolumes.push_back(newVol);
+                }
+                sessionRestoreGuard.journal().record_applied(appliedVolumes);
+                for (size_t index = 0; index < sessions.size(); ++index) {
+                    auto& s = sessions[index];
+                    const float newVol = appliedVolumes[index];
                     check_hresult(s.volume->SetMasterVolume(newVol, nullptr),
                                   "ISimpleAudioVolume::SetMasterVolume(AGC)");
                 }
@@ -1098,6 +1372,7 @@ void run_probe(const Options& options) {
     if (!restore_sessions(sessions)) {
         throw std::runtime_error("One or more target session volumes could not be restored");
     }
+    sessionRestoreGuard.clear_journal();
     std::cout << "Done.\n" << std::flush;
 }
 
@@ -1109,6 +1384,17 @@ int wmain(int argc, wchar_t* argv[]) {
     if (!options) {
         print_usage();
         return 2;
+    }
+
+    UniqueHandle instanceMutex(CreateMutexW(
+        nullptr, FALSE, L"Local\\LevelMateVolumeController"));
+    if (!instanceMutex) {
+        std::wcerr << L"Unable to create the LevelMate instance lock.\n";
+        return 1;
+    }
+    if (GetLastError() == ERROR_ALREADY_EXISTS) {
+        std::wcerr << L"Another LevelMate instance is already controlling audio.\n";
+        return 1;
     }
 
     const HRESULT comResult = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
@@ -1133,6 +1419,7 @@ int wmain(int argc, wchar_t* argv[]) {
 
     int exitCode = 0;
     try {
+        recover_interrupted_session_changes();
         run_probe(*options);
     } catch (const HrError& error) {
         std::wcerr << std::wstring(error.what(), error.what() + std::strlen(error.what()))

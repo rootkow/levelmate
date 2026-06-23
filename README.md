@@ -15,7 +15,8 @@ applications. The current implementation supports Windows audio.
 - Optional digital boost for content that remains quiet at 100% app volume
 - Live terminal meters for raw level, smoothed level, target, and gain
 - Application targeting that leaves unrelated audio unchanged
-- Automatic restoration of the application's original volume on clean exit
+- Automatic restoration of the application's original volume after clean or
+  interrupted runs
 - No recording, saved audio, network communication, or telemetry
 
 ## Operating modes
@@ -75,8 +76,8 @@ ctest --test-dir build -C Release --output-on-failure
 ```
 
 The tests cover CLI parsing, silence gating, gain limits, peak limiting, PCM
-sample conversion, clipping, and the audio ring buffer. They do not require an
-active audio device or target application.
+sample conversion, clipping, the audio ring buffer, and recovery-record
+validation. They do not require an active audio device or target application.
 
 ## Choose a target process
 
@@ -159,6 +160,12 @@ instances targeting the same app would compete over volume control and cleanup.
   add up to 20 dB to quiet material.
 - Stop LevelMate with Ctrl+C or let `--duration` expire. Both paths restore the
   target application's volume settings captured at startup.
+- LevelMate writes a small recovery record before changing application volume.
+  If it is terminated unexpectedly, the next launch restores a matching active
+  audio session before starting normalization. A newer manual volume change is
+  preserved.
+- Only one LevelMate instance can control audio at a time so recovery records
+  cannot overwrite one another.
 - If the process is forcibly terminated or the computer loses power, cleanup
   cannot run. Restore the app manually through Windows Volume mixer if needed.
 - If the default output device changes while digital boost mode is running,

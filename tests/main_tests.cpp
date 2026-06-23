@@ -153,6 +153,33 @@ void test_ring_buffer() {
            "PCM8 silence uses its midpoint representation");
 }
 
+void test_recovery_serialization() {
+    const std::vector<RecoveryEntry> entries{
+        {0.75F, 0.25F, L"session-one", L"instance-one"},
+        {1.0F, 0.5F, L"session-two", L"instance-two"},
+    };
+    const auto encoded = serialize_recovery_entries(entries);
+    const auto decoded = deserialize_recovery_entries(encoded);
+    expect(decoded && decoded->size() == entries.size(),
+           "recovery journal round-trips its entries");
+    expect(decoded && (*decoded)[0].sessionIdentifier == L"session-one" &&
+               (*decoded)[0].instanceIdentifier == L"instance-one",
+           "recovery journal preserves session identities");
+    expect(decoded && std::abs((*decoded)[1].originalVolume - 1.0F) < 0.0001F &&
+               std::abs((*decoded)[1].appliedVolume - 0.5F) < 0.0001F,
+           "recovery journal preserves volume values");
+
+    auto truncated = encoded;
+    truncated.pop_back();
+    expect(!deserialize_recovery_entries(truncated),
+           "recovery journal rejects truncated data");
+
+    auto invalidMagic = encoded;
+    invalidMagic[0] ^= 0xFF;
+    expect(!deserialize_recovery_entries(invalidMagic),
+           "recovery journal rejects an invalid header");
+}
+
 }  // namespace
 
 int main() {
@@ -160,6 +187,7 @@ int main() {
     test_gain_control();
     test_sample_processing();
     test_ring_buffer();
+    test_recovery_serialization();
 
     if (failures != 0) {
         std::cerr << failures << " test assertion(s) failed.\n";
