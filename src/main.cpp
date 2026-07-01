@@ -625,7 +625,10 @@ void recover_interrupted_session_changes() {
             return !entry.sessionIdentifier.empty() &&
                    session.sessionIdentifier == entry.sessionIdentifier;
         });
-        if (match == active.end()) continue;
+        if (match == active.end()) {
+            unresolved.push_back(entry);
+            continue;
+        }
 
         float current = 0.0F;
         if (FAILED(match->volume->GetMasterVolume(&current))) {
