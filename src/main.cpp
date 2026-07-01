@@ -430,6 +430,7 @@ struct RecoveryEntry {
 constexpr std::uint32_t kRecoveryMagic = 0x4C4D5243;  // LMRC
 constexpr std::uint32_t kRecoveryVersion = 1;
 constexpr size_t kMaxRecoveryFileSize = 1024 * 1024;
+constexpr float kRecoveryVolumeTolerance = 0.0001F;
 
 template <typename Value>
 void append_recovery_value(std::vector<BYTE>& bytes, const Value& value) {
@@ -605,6 +606,29 @@ private:
     std::vector<RecoveryEntry> entries_;
 };
 
+bool recovery_entry_matches_session(const RecoveryEntry& entry,
+                                    const SessionInfo& session) {
+    if (!entry.instanceIdentifier.empty() &&
+        session.instanceIdentifier == entry.instanceIdentifier) {
+        return true;
+    }
+    return !entry.sessionIdentifier.empty() &&
+           session.sessionIdentifier == entry.sessionIdentifier;
+}
+
+auto find_recovery_session(std::vector<SessionInfo>& sessions,
+                           const RecoveryEntry& entry) {
+    return std::find_if(sessions.begin(), sessions.end(),
+                        [&](const SessionInfo& session) {
+                            return recovery_entry_matches_session(entry, session);
+                        });
+}
+
+bool recovery_volume_was_changed_manually(float currentVolume,
+                                          const RecoveryEntry& entry) {
+    return std::abs(currentVolume - entry.appliedVolume) > kRecoveryVolumeTolerance;
+}
+
 void recover_interrupted_session_changes() {
     const auto path = recovery_file_path();
     const auto pending = read_recovery_file(path);
@@ -619,12 +643,7 @@ void recover_interrupted_session_changes() {
     size_t restored = 0;
     std::vector<RecoveryEntry> unresolved;
     for (const auto& entry : *pending) {
-        auto match = std::find_if(active.begin(), active.end(), [&](const SessionInfo& session) {
-            if (!entry.instanceIdentifier.empty() &&
-                session.instanceIdentifier == entry.instanceIdentifier) return true;
-            return !entry.sessionIdentifier.empty() &&
-                   session.sessionIdentifier == entry.sessionIdentifier;
-        });
+        auto match = find_recovery_session(active, entry);
         if (match == active.end()) {
             unresolved.push_back(entry);
             continue;
@@ -635,7 +654,7 @@ void recover_interrupted_session_changes() {
             unresolved.push_back(entry);
             continue;
         }
-        if (std::abs(current - entry.appliedVolume) > 0.0001F) {
+        if (recovery_volume_was_changed_manually(current, entry)) {
             continue;  // Preserve a volume change made after LevelMate stopped.
         }
         if (FAILED(match->volume->SetMasterVolume(entry.originalVolume, nullptr))) {

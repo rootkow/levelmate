@@ -187,6 +187,36 @@ void test_recovery_serialization() {
            "recovery read still reports non-missing errors");
 }
 
+void test_recovery_policy() {
+    RecoveryEntry pending{0.75F, 0.25F, L"session-one", L"instance-one"};
+
+    SessionInfo instanceMatch{};
+    instanceMatch.sessionIdentifier = L"different-session";
+    instanceMatch.instanceIdentifier = L"instance-one";
+    std::vector<SessionInfo> sessions{instanceMatch};
+    expect(find_recovery_session(sessions, pending) == sessions.begin(),
+           "recovery matches the stable session instance identifier first");
+
+    SessionInfo sessionMatch{};
+    sessionMatch.sessionIdentifier = L"session-one";
+    sessionMatch.instanceIdentifier = L"";
+    sessions = {sessionMatch};
+    expect(find_recovery_session(sessions, pending) == sessions.begin(),
+           "recovery falls back to the session identifier");
+
+    SessionInfo unrelated{};
+    unrelated.sessionIdentifier = L"session-two";
+    unrelated.instanceIdentifier = L"instance-two";
+    sessions = {unrelated};
+    expect(find_recovery_session(sessions, pending) == sessions.end(),
+           "unmatched recovery entries remain unresolved for a future launch");
+
+    expect(!recovery_volume_was_changed_manually(0.25005F, pending),
+           "recovery tolerates small volume rounding differences");
+    expect(recovery_volume_was_changed_manually(0.5F, pending),
+           "recovery preserves newer manual volume changes");
+}
+
 }  // namespace
 
 int main() {
@@ -195,6 +225,7 @@ int main() {
     test_sample_processing();
     test_ring_buffer();
     test_recovery_serialization();
+    test_recovery_policy();
 
     if (failures != 0) {
         std::cerr << failures << " test assertion(s) failed.\n";
