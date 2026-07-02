@@ -16,11 +16,23 @@ void expect(bool condition, std::string_view message) {
 
 void expect_near(double actual, double expected, double tolerance,
                  std::string_view message) {
-    if (std::abs(actual - expected) > tolerance) {
+    if (!std::isfinite(actual) || !std::isfinite(expected) ||
+        std::abs(actual - expected) > tolerance) {
         std::cerr << "FAIL: " << message << " (expected " << expected
                   << ", got " << actual << ")\n";
         ++failures;
     }
+}
+
+template <typename Callable>
+void expect_throws(Callable&& callable, std::string_view message) {
+    try {
+        callable();
+    } catch (const std::exception&) {
+        return;
+    }
+    std::cerr << "FAIL: " << message << '\n';
+    ++failures;
 }
 
 std::optional<Options> parse(std::initializer_list<std::wstring_view> arguments) {
@@ -61,10 +73,20 @@ void test_options() {
            "rejects a missing duration value");
     expect(!parse({L"levelmate.exe", L"42", L"--duration", L"0"}),
            "rejects a zero duration");
+    expect(!parse({L"levelmate.exe", L"42", L"--duration", L"-1"}),
+           "rejects a negative duration");
+    expect(!parse({L"levelmate.exe", L"42", L"--duration", L"30", L"--duration", L"60"}),
+           "rejects duplicate duration flags");
     expect(!parse({L"levelmate.exe", L"42", L"--rerender", L"--rerender"}),
            "rejects duplicate rerender flags");
     expect(!parse({L"levelmate.exe", L"42", L"--unknown"}),
            "rejects unknown flags");
+    expect(!parse({L"levelmate.exe"}), "rejects a missing PID");
+    expect(!parse({L"levelmate.exe", L"-1"}), "rejects a negative PID");
+    expect(!parse({L"levelmate.exe", L"4294967296"}),
+           "rejects a PID above DWORD range");
+    expect(!parse({L"levelmate.exe", L"42", L"--duration", L"9223372036854775808"}),
+           "rejects a duration above signed 64-bit range");
 }
 
 void test_gain_control() {
@@ -124,6 +146,146 @@ void test_sample_processing() {
         expect_near(decode_sample(bytes.data(), encoding), -0.5, tolerance,
                     "sample encoding round-trips negative values");
     }
+
+    std::array<BYTE, 4> pcm8{};
+    encode_sample(pcm8.data(), SampleEncoding::Pcm8, 0.0);
+    expect(pcm8[0] == 128, "PCM8 encodes zero at the unsigned midpoint");
+    encode_sample(pcm8.data(), SampleEncoding::Pcm8, 1.0);
+    expect(pcm8[0] == 255, "PCM8 encodes full-scale positive samples");
+    encode_sample(pcm8.data(), SampleEncoding::Pcm8, -1.0);
+    expect(pcm8[0] == 0, "PCM8 encodes full-scale negative samples");
+
+    std::array<BYTE, 4> pcm16{};
+    encode_sample(pcm16.data(), SampleEncoding::Pcm16, 0.5);
+    expect(pcm16[0] == 0x00 && pcm16[1] == 0x40,
+           "PCM16 encodes little-endian positive samples");
+    encode_sample(pcm16.data(), SampleEncoding::Pcm16, -1.0);
+    expect(pcm16[0] == 0x00 && pcm16[1] == 0x80,
+           "PCM16 encodes little-endian negative full scale");
+
+    std::array<BYTE, 4> pcm24{};
+    encode_sample(pcm24.data(), SampleEncoding::Pcm24, 0.5);
+    expect(pcm24[0] == 0x00 && pcm24[1] == 0x00 && pcm24[2] == 0x40,
+           "PCM24 encodes little-endian positive samples");
+    encode_sample(pcm24.data(), SampleEncoding::Pcm24, -1.0);
+    expect(pcm24[0] == 0x00 && pcm24[1] == 0x00 && pcm24[2] == 0x80,
+           "PCM24 encodes little-endian negative full scale");
+
+    std::array<BYTE, 4> pcm32{};
+    encode_sample(pcm32.data(), SampleEncoding::Pcm32, 0.5);
+    expect(pcm32[0] == 0x00 && pcm32[1] == 0x00 &&
+               pcm32[2] == 0x00 && pcm32[3] == 0x40,
+           "PCM32 encodes little-endian positive samples");
+    encode_sample(pcm32.data(), SampleEncoding::Pcm32, -1.0);
+    expect(pcm32[0] == 0x00 && pcm32[1] == 0x00 &&
+               pcm32[2] == 0x00 && pcm32[3] == 0x80,
+           "PCM32 encodes little-endian negative full scale");
+
+    WAVEFORMATEX pcm16Format{};
+    pcm16Format.wFormatTag = WAVE_FORMAT_PCM;
+    pcm16Format.nChannels = 2;
+    pcm16Format.nSamplesPerSec = 48000;
+    pcm16Format.wBitsPerSample = 16;
+    pcm16Format.nBlockAlign = 4;
+    pcm16Format.nAvgBytesPerSec = pcm16Format.nSamplesPerSec * pcm16Format.nBlockAlign;
+    std::array<BYTE, 4> pcm16Frame{};
+    encode_sample(pcm16Frame.data(), SampleEncoding::Pcm16, 0.25);
+    encode_sample(pcm16Frame.data() + 2, SampleEncoding::Pcm16, -0.25);
+    const auto pcm16Doubled = apply_digital_gain(
+        pcm16Frame.data(), 1, pcm16Format, SampleEncoding::Pcm16, 2.0);
+    expect_near(decode_sample(pcm16Doubled.data(), SampleEncoding::Pcm16),
+                0.5, 0.0001, "digital gain scales PCM16 samples");
+    expect_near(decode_sample(pcm16Doubled.data() + 2, SampleEncoding::Pcm16),
+                -0.5, 0.0001, "digital gain scales negative PCM16 samples");
+}
+
+void test_sample_formats() {
+    WAVEFORMATEX floatFormat{};
+    floatFormat.wFormatTag = WAVE_FORMAT_IEEE_FLOAT;
+    floatFormat.wBitsPerSample = 32;
+    expect(sample_encoding(floatFormat) == SampleEncoding::Float32,
+           "recognizes 32-bit float formats");
+
+    WAVEFORMATEX pcm24Format{};
+    pcm24Format.wFormatTag = WAVE_FORMAT_PCM;
+    pcm24Format.wBitsPerSample = 24;
+    expect(sample_encoding(pcm24Format) == SampleEncoding::Pcm24,
+           "recognizes 24-bit PCM formats");
+
+    WAVEFORMATEXTENSIBLE extensibleFloat{};
+    extensibleFloat.Format.wFormatTag = WAVE_FORMAT_EXTENSIBLE;
+    extensibleFloat.Format.wBitsPerSample = 32;
+    extensibleFloat.Format.cbSize =
+        sizeof(WAVEFORMATEXTENSIBLE) - sizeof(WAVEFORMATEX);
+    extensibleFloat.SubFormat = KSDATAFORMAT_SUBTYPE_IEEE_FLOAT;
+    expect(sample_encoding(extensibleFloat.Format) == SampleEncoding::Float32,
+           "recognizes extensible float formats");
+
+    WAVEFORMATEXTENSIBLE extensiblePcm{};
+    extensiblePcm.Format.wFormatTag = WAVE_FORMAT_EXTENSIBLE;
+    extensiblePcm.Format.wBitsPerSample = 16;
+    extensiblePcm.Format.cbSize =
+        sizeof(WAVEFORMATEXTENSIBLE) - sizeof(WAVEFORMATEX);
+    extensiblePcm.SubFormat = KSDATAFORMAT_SUBTYPE_PCM;
+    expect(sample_encoding(extensiblePcm.Format) == SampleEncoding::Pcm16,
+           "recognizes extensible PCM formats");
+
+    WAVEFORMATEX unsupportedBits{};
+    unsupportedBits.wFormatTag = WAVE_FORMAT_PCM;
+    unsupportedBits.wBitsPerSample = 20;
+    expect_throws([&] { sample_encoding(unsupportedBits); },
+                  "rejects unsupported PCM bit depths");
+
+    WAVEFORMATEXTENSIBLE shortExtensible{};
+    shortExtensible.Format.wFormatTag = WAVE_FORMAT_EXTENSIBLE;
+    shortExtensible.Format.cbSize = 0;
+    expect_throws([&] { sample_encoding(shortExtensible.Format); },
+                  "rejects undersized extensible formats");
+
+    WAVEFORMATEXTENSIBLE unsupportedSubformat{};
+    unsupportedSubformat.Format.wFormatTag = WAVE_FORMAT_EXTENSIBLE;
+    unsupportedSubformat.Format.wBitsPerSample = 32;
+    unsupportedSubformat.Format.cbSize =
+        sizeof(WAVEFORMATEXTENSIBLE) - sizeof(WAVEFORMATEX);
+    unsupportedSubformat.SubFormat = GUID{};
+    expect_throws([&] { sample_encoding(unsupportedSubformat.Format); },
+                  "rejects unsupported extensible subformats");
+}
+
+void test_packet_measurement() {
+    WAVEFORMATEX floatFormat{};
+    floatFormat.wFormatTag = WAVE_FORMAT_IEEE_FLOAT;
+    floatFormat.nChannels = 2;
+    floatFormat.nSamplesPerSec = 48000;
+    floatFormat.wBitsPerSample = 32;
+    floatFormat.nBlockAlign = 8;
+    floatFormat.nAvgBytesPerSec = floatFormat.nSamplesPerSec * floatFormat.nBlockAlign;
+
+    const std::array<float, 4> floatSamples{0.5F, -0.5F, 0.25F, -0.25F};
+    const auto floatStats = measure_packet(
+        reinterpret_cast<const BYTE*>(floatSamples.data()), 2,
+        floatFormat, SampleEncoding::Float32);
+    expect(floatStats.frames == 2, "packet measurement reports frame count");
+    expect_near(floatStats.peak, 0.5, 1e-12, "packet measurement reports peak");
+    expect_near(floatStats.rms, std::sqrt(0.15625), 1e-12,
+                "packet measurement reports multi-channel RMS");
+
+    WAVEFORMATEX pcm16Format{};
+    pcm16Format.wFormatTag = WAVE_FORMAT_PCM;
+    pcm16Format.nChannels = 1;
+    pcm16Format.nSamplesPerSec = 48000;
+    pcm16Format.wBitsPerSample = 16;
+    pcm16Format.nBlockAlign = 2;
+    pcm16Format.nAvgBytesPerSec = pcm16Format.nSamplesPerSec * pcm16Format.nBlockAlign;
+    std::array<BYTE, 4> pcmSamples{};
+    encode_sample(pcmSamples.data(), SampleEncoding::Pcm16, 0.25);
+    encode_sample(pcmSamples.data() + 2, SampleEncoding::Pcm16, -0.75);
+    const auto pcmStats = measure_packet(
+        pcmSamples.data(), 2, pcm16Format, SampleEncoding::Pcm16);
+    expect_near(pcmStats.peak, 0.75, 0.0001,
+                "packet measurement decodes PCM peaks");
+    expect_near(pcmStats.rms, std::sqrt((0.25 * 0.25 + 0.75 * 0.75) / 2.0),
+                0.0001, "packet measurement decodes PCM RMS");
 }
 
 void test_ring_buffer() {
@@ -151,6 +313,31 @@ void test_ring_buffer() {
     pcm8Queue.push_silence(2);
     expect(pcm8Queue.pop(output.data(), 2) == 2 && output[0] == 128 && output[1] == 128,
            "PCM8 silence uses its midpoint representation");
+
+    expect(pcm8Queue.pop(output.data(), 2) == 0,
+           "ring buffer reports empty pops");
+
+    AudioRingBuffer stereoQueue(3, 2, 0);
+    const std::array<BYTE, 6> stereoFirst{1, 10, 2, 20, 3, 30};
+    stereoQueue.push(stereoFirst.data(), 3);
+    std::array<BYTE, 6> stereoOutput{};
+    expect(stereoQueue.pop(stereoOutput.data(), 1) == 1,
+           "ring buffer pops one multi-byte frame");
+    expect(stereoOutput[0] == 1 && stereoOutput[1] == 10,
+           "ring buffer preserves multi-byte frame contents");
+    const std::array<BYTE, 4> stereoSecond{4, 40, 5, 50};
+    stereoQueue.push(stereoSecond.data(), 2);
+    expect(stereoQueue.pop(stereoOutput.data(), 3) == 3,
+           "ring buffer wraps multi-byte frames");
+    expect(stereoOutput == std::array<BYTE, 6>{3, 30, 4, 40, 5, 50},
+           "ring buffer drops oldest multi-byte frames on overflow");
+
+    AudioRingBuffer stereoSilenceQueue(2, 2, 0x7F);
+    stereoSilenceQueue.push_silence(3);
+    expect(stereoSilenceQueue.pop(stereoOutput.data(), 2) == 2 &&
+               stereoOutput[0] == 0x7F && stereoOutput[1] == 0x7F &&
+               stereoOutput[2] == 0x7F && stereoOutput[3] == 0x7F,
+           "ring buffer silence overflow fills complete multi-byte frames");
 }
 
 void test_recovery_serialization() {
@@ -178,6 +365,57 @@ void test_recovery_serialization() {
     invalidMagic[0] ^= 0xFF;
     expect(!deserialize_recovery_entries(invalidMagic),
            "recovery journal rejects an invalid header");
+
+    auto invalidVersion = encoded;
+    const std::uint32_t unsupportedVersion = kRecoveryVersion + 1;
+    std::memcpy(invalidVersion.data() + sizeof(std::uint32_t),
+                &unsupportedVersion, sizeof(unsupportedVersion));
+    expect(!deserialize_recovery_entries(invalidVersion),
+           "recovery journal rejects unsupported versions");
+
+    auto withTrailingBytes = encoded;
+    withTrailingBytes.push_back(0);
+    expect(!deserialize_recovery_entries(withTrailingBytes),
+           "recovery journal rejects trailing bytes");
+
+    auto invalidCount = encoded;
+    const std::uint32_t excessiveCount = 4097;
+    std::memcpy(invalidCount.data() + sizeof(std::uint32_t) * 2,
+                &excessiveCount, sizeof(excessiveCount));
+    expect(!deserialize_recovery_entries(invalidCount),
+           "recovery journal rejects excessive entry counts");
+
+    auto invalidVolume = encoded;
+    const float outOfRangeVolume = 1.5F;
+    std::memcpy(invalidVolume.data() + sizeof(std::uint32_t) * 3,
+                &outOfRangeVolume, sizeof(outOfRangeVolume));
+    expect(!deserialize_recovery_entries(invalidVolume),
+           "recovery journal rejects out-of-range volumes");
+
+    auto nanVolume = encoded;
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    std::memcpy(nanVolume.data() + sizeof(std::uint32_t) * 3,
+                &nan, sizeof(nan));
+    expect(!deserialize_recovery_entries(nanVolume),
+           "recovery journal rejects NaN volumes");
+
+    auto infiniteVolume = encoded;
+    const float infinity = std::numeric_limits<float>::infinity();
+    std::memcpy(infiniteVolume.data() + sizeof(std::uint32_t) * 3 + sizeof(float),
+                &infinity, sizeof(infinity));
+    expect(!deserialize_recovery_entries(infiniteVolume),
+           "recovery journal rejects infinite volumes");
+
+    auto invalidStringLength = encoded;
+    const std::uint32_t impossibleLength = 0xFFFFFFFF;
+    constexpr size_t firstStringLengthOffset =
+        sizeof(std::uint32_t) * 3 + sizeof(float) * 2;
+    std::memcpy(invalidStringLength.data() + firstStringLengthOffset,
+                &impossibleLength, sizeof(impossibleLength));
+    expect(!deserialize_recovery_entries(invalidStringLength),
+           "recovery journal rejects malformed string lengths");
+    expect(!deserialize_recovery_entries({}),
+           "recovery journal rejects empty byte streams");
 
     expect(is_missing_recovery_file_error(ERROR_FILE_NOT_FOUND),
            "recovery read treats a missing file as empty");
@@ -223,6 +461,8 @@ int main() {
     test_options();
     test_gain_control();
     test_sample_processing();
+    test_sample_formats();
+    test_packet_measurement();
     test_ring_buffer();
     test_recovery_serialization();
     test_recovery_policy();
